@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lead Pitcher v2 – PDF → Auto Pitch</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #050505; font-family: 'Inter', -apple-system, sans-serif; color: #fff; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // ✅ Calls our own Vercel proxy — no CORS, no key exposed
+    const callClaude = async (body) => {
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    };
+
+    function SpinDot() {
+      return <span style={{ width:14, height:14, border:"2px solid #333", borderTop:"2px solid #25D366", borderRadius:"50%", display:"inline-block", animation:"spin 0.8s linear infinite" }} />;
+    }
+
+    function LeadCard({ lead, onSend, onDelete, onRegenerate }) {
+      const [expanded, setExpanded] = useState(false);
+      const ready = !!lead.pitch && !lead.pitch.startsWith("Error");
+      const typeEmoji = { Salon:"💇", Clinic:"🏥", Restaurant:"🍽️", Gym:"💪", Boutique:"👗", Coaching:"📚", Other:"🏪" };
+
+      return (
+        <div style={{ background:"#0d0d0d", border:"1px solid #1a1a1a", borderRadius:14, overflow:"hidden" }}>
+          <div style={{ padding:"14px 16px", display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:40, height:40, borderRadius:11, background:"#111", border:"1px solid #222", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>
+              {typeEmoji[lead.type] || "🏪"}
+            </div>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontWeight:700, fontSize:15, color:"#fff" }}>{lead.name}</div>
+              <div style={{ color:"#444", fontSize:12, marginTop:2 }}>{lead.type} • {lead.phone}</div>
+            </div>
+            <button onClick={onDelete} style={{ background:"none", border:"none", color:"#333", cursor:"pointer", fontSize:16, padding:4 }}>✕</button>
+          </div>
+
+          {lead.pitch && (
+            <div style={{ padding:"0 16px 12px" }}>
+              <div onClick={() => setExpanded(e => !e)} style={{ background:"#111", border:"1px solid #1e1e1e", borderRadius:10, padding:"10px 12px", cursor:"pointer" }}>
+                <div style={{ color:"#444", fontSize:11, marginBottom:6, fontWeight:700, textTransform:"uppercase", letterSpacing:1 }}>
+                  Pitch {expanded ? "▲" : "▼"}
+                </div>
+                <div style={{ color:"#aaa", fontSize:13, lineHeight:1.6, overflow:"hidden", maxHeight:expanded?"none":"40px", whiteSpace:"pre-wrap" }}>
+                  {lead.pitch}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={{ padding:"0 16px 14px", display:"flex", gap:8 }}>
+            <button onClick={onSend} disabled={!ready} style={{ flex:1, background:ready?"#25D366":"#111", color:ready?"#000":"#555", border:"none", borderRadius:10, padding:"12px", fontSize:14, fontWeight:800, cursor:ready?"pointer":"not-allowed", display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+              {ready ? "📲 Send via WhatsApp" : <><SpinDot /> Generating...</>}
+            </button>
+            {lead.pitch && (
+              <button onClick={onRegenerate} style={{ background:"#111", border:"1px solid #222", color:"#555", borderRadius:10, padding:"12px 14px", cursor:"pointer", fontSize:13, fontWeight:700 }}>🔄</button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [leads, setLeads] = useState([]);
+      const [view, setView] = useState("upload");
+      const [pdfReady, setPdfReady] = useState(false);
+      const [status, setStatus] = useState("");
+      const [progress, setProgress] = useState({ done:0, total:0 });
+      const [error, setError] = useState("");
+      const fileInputRef = useRef(null);
+
+      useEffect(() => {
+        if (window.pdfjsLib) { setPdfReady(true); return; }
+        const s = document.createElement("script");
+        s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+        s.onload = () => {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+          setPdfReady(true);
+        };
+        s.onerror = () => setError("PDF reader load nahi hua.");
+        document.body.appendChild(s);
+      }, []);
+
+      const extractTextFromPDF = async (file) => {
+        const buffer = await file.arrayBuffer();
+        const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+        let txt = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          txt += `\n--- PAGE ${i} ---\n` + content.items.map(x => x.str).join(" ");
+        }
+        return txt;
+      };
+
+      const extractLeadsFromText = async (text) => {
+        const data = await callClaude({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4000,
+          messages: [{
+            role: "user",
+            content: `Yeh text ek PDF se extracted hai jisme business leads ki table hai. Har row mein hota hai: ek number, ek business/institute ka naam, ek Indian phone number (format jaisa +91 XXXXX XXXXX ya +91 XX XXXX XXXX), aur kuch extra notes/columns (jaise "Why Target", price estimate, chance %, status - yeh sab ignore karo).
+
+Tera kaam: Har valid lead ko nikal ke ek JSON array banao. Har object mein sirf 2 fields hon:
+- "name": business/institute ka pura naam (extra symbols hata do)
+- "phone": phone number, sirf digits + country code, format "+91XXXXXXXXXX" (spaces hata do)
+
+Rules:
+- Sirf wahi rows include karo jinme valid phone number ho
+- Duplicate leads skip karo
+- Summary/footer/tips text ko ignore karo
+- Sirf JSON array return karo, kuch aur text nahi, na hi markdown backticks
+
+Text:
+${text}`
+          }]
+        });
+        let raw = (data.content?.[0]?.text || "[]").replace(/```json|```/g, "").trim();
+        try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; }
+      };
+
+      const guessType = (name) => {
+        const n = name.toLowerCase();
+        if (/(clinic|hospital|dental|dent|health|skin|derma)/.test(n)) return "Clinic";
+        if (/(salon|beauty|spa|parlour|hair|glam)/.test(n)) return "Salon";
+        if (/(restaurant|cafe|hotel|biryani|dhaba|kitchen|food)/.test(n)) return "Restaurant";
+        if (/(gym|fitness|workout)/.test(n)) return "Gym";
+        if (/(boutique|fashion|fab|wear)/.test(n)) return "Boutique";
+        if (/(class|coaching|academy|institute|tuition|education)/.test(n)) return "Coaching";
+        return "Other";
+      };
+
+      const SERVICE_PITCHES = {
+        Salon: "website + online booking + Google listing",
+        Clinic: "website + appointment booking + patient reviews",
+        Restaurant: "website + online menu + Google Maps presence",
+        Gym: "website + membership inquiry + Google reviews",
+        Boutique: "website + product catalog + Instagram link",
+        Coaching: "website + admission portal + SEO/Google Ads",
+        Other: "professional website + online presence",
+      };
+
+      const generatePitch = async (lead) => {
+        const data = await callClaude({
+          model: "claude-sonnet-4-6",
+          max_tokens: 600,
+          messages: [{
+            role: "user",
+            content: `Tu ek Indian digital marketing expert hai.
+Ek ${lead.type} ke owner ko WhatsApp message likhna hai jo unhe ${SERVICE_PITCHES[lead.type]} lene pe convince kare.
+
+Business details:
+- Business name: ${lead.name}
+
+Rules:
+- Hinglish mein likho (Hindi + English mix)
+- Friendly aur personal tone - jaise koi dost baat kar raha ho
+- 4-5 lines max
+- Ek specific pain point mention karo
+- End mein ek simple haan/naa wala question karo
+- Apna intro mat karo, seedha business pe aao
+- Pricing mat batao abhi
+
+Sirf message likho, kuch aur nahi.`
+          }]
+        });
+        return data.content?.[0]?.text || "Pitch generate nahi hua.";
+      };
+
+      const handleFile = async (file) => {
+        if (!file || file.type !== "application/pdf") { setError("Please ek PDF file select karo."); return; }
+        setError(""); setLeads([]); setStatus("PDF padh raha hoon..."); setProgress({ done:0, total:0 });
+        try {
+          const text = await extractTextFromPDF(file);
+          setStatus("Leads dhund raha hoon...");
+          const extracted = await extractLeadsFromText(text);
+          if (!extracted.length) { setError("Koi lead nahi mila. Format check karo."); setStatus(""); return; }
+
+          const withType = extracted.map((l, i) => ({ id: Date.now()+i, name:l.name, phone:l.phone, type:guessType(l.name), pitch:null }));
+          setLeads(withType);
+          setView("leads");
+          setProgress({ done:0, total:withType.length });
+          setStatus(`${withType.length} leads mile! Pitches ban rahe hain...`);
+
+          const CONCURRENCY = 3;
+          const queue = [...withType];
+          let idx = 0;
+          const worker = async () => {
+            while (queue.length > 0) {
+              const lead = queue.shift();
+              try {
+                const pitch = await generatePitch(lead);
+                setLeads(prev => prev.map(l => l.id===lead.id ? {...l, pitch} : l));
+              } catch {
+                setLeads(prev => prev.map(l => l.id===lead.id ? {...l, pitch:"Error - 🔄 se retry karo"} : l));
+              }
+              idx++;
+              setProgress({ done:idx, total:withType.length });
+            }
+          };
+          await Promise.all(Array.from({ length:CONCURRENCY }, worker));
+          setStatus("");
+        } catch(e) {
+          setError("PDF process karne mein error aaya: " + e.message);
+          setStatus("");
+        }
+      };
+
+      const openWhatsApp = (phone, msg) => {
+        const cleaned = phone.replace(/\D/g, "");
+        const num = cleaned.startsWith("91") ? cleaned : `91${cleaned}`;
+        window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
+      };
+
+      const regeneratePitch = async (lead) => {
+        setLeads(prev => prev.map(l => l.id===lead.id ? {...l, pitch:null} : l));
+        try {
+          const pitch = await generatePitch(lead);
+          setLeads(prev => prev.map(l => l.id===lead.id ? {...l, pitch} : l));
+        } catch {
+          setLeads(prev => prev.map(l => l.id===lead.id ? {...l, pitch:"Error - phir try karo"} : l));
+        }
+      };
+
+      return (
+        <div style={{ minHeight:"100vh" }}>
+          <div style={{ padding:"20px 20px 0", borderBottom:"1px solid #111" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <div>
+                <div style={{ fontSize:11, color:"#25D366", letterSpacing:2, textTransform:"uppercase", fontWeight:700, marginBottom:4 }}>● Lead Pitcher v2</div>
+                <h1 style={{ margin:0, fontSize:22, fontWeight:800, letterSpacing:-0.5 }}>PDF → Auto Pitch</h1>
+              </div>
+              <div style={{ background:"#111", borderRadius:12, padding:"4px 6px", display:"flex", gap:4 }}>
+                {["upload","leads"].map(v => (
+                  <button key={v} onClick={() => setView(v)} style={{ background:view===v?"#25D366":"none", color:view===v?"#000":"#555", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:13, fontWeight:700 }}>
+                    {v==="upload" ? "📄 Upload" : `📋 Leads${leads.length ? ` (${leads.length})` : ""}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {view === "upload" && (
+            <div style={{ padding:20 }}>
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); const f=e.dataTransfer.files?.[0]; if(f) handleFile(f); }}
+                style={{ background:"#0d0d0d", border:"2px dashed #1e1e1e", borderRadius:16, padding:"48px 20px", textAlign:"center", cursor:pdfReady?"pointer":"wait" }}
+              >
+                <div style={{ fontSize:44, marginBottom:14 }}>📄</div>
+                <div style={{ fontSize:16, fontWeight:700, marginBottom:6 }}>{pdfReady ? "Leads PDF Upload Karo" : "Loading PDF reader..."}</div>
+                <div style={{ color:"#555", fontSize:13, marginBottom:18 }}>Tap karo ya file yahan drop karo</div>
+                <div style={{ display:"inline-block", background:"#25D366", color:"#000", fontWeight:800, fontSize:13, padding:"10px 24px", borderRadius:10 }}>Choose PDF File</div>
+                <input ref={fileInputRef} type="file" accept="application/pdf" style={{ display:"none" }} onChange={e => { const f=e.target.files?.[0]; if(f) handleFile(f); }} />
+              </div>
+
+              {status && (
+                <div style={{ marginTop:16, background:"#0d1f14", border:"1px solid #25D36633", borderRadius:12, padding:"14px 16px", display:"flex", alignItems:"center", gap:10 }}>
+                  <SpinDot />
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:13, color:"#25D366", fontWeight:700 }}>{status}</div>
+                    {progress.total > 0 && (
+                      <div style={{ marginTop:8 }}>
+                        <div style={{ background:"#111", borderRadius:100, height:6, overflow:"hidden" }}>
+                          <div style={{ width:`${(progress.done/progress.total)*100}%`, background:"#25D366", height:"100%", transition:"width 0.3s" }} />
+                        </div>
+                        <div style={{ fontSize:11, color:"#555", marginTop:6 }}>{progress.done} / {progress.total} pitches ready</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {error && (
+                <div style={{ marginTop:16, background:"#1f0d0d", border:"1px solid #ff333333", borderRadius:12, padding:"14px 16px", color:"#ff6666", fontSize:13 }}>
+                  ⚠️ {error}
+                </div>
+              )}
+
+              <div style={{ marginTop:24, color:"#444", fontSize:12, lineHeight:1.7, textAlign:"center" }}>
+                PDF mein business name + phone number ki table honi chahiye.<br />
+                App automatically sab leads nikalega + har ek ke liye pitch banayega.<br />
+                Phir "Leads" tab mein jaake bas Send dabao!
+              </div>
+            </div>
+          )}
+
+          {view === "leads" && (
+            <div style={{ padding:20, display:"flex", flexDirection:"column", gap:12 }}>
+              {status && progress.total > 0 && progress.done < progress.total && (
+                <div style={{ background:"#0d1f14", border:"1px solid #25D36633", borderRadius:10, padding:"10px 14px", fontSize:12, color:"#25D366", display:"flex", alignItems:"center", gap:8 }}>
+                  <SpinDot /> Pitches ban rahe hain... {progress.done}/{progress.total}
+                </div>
+              )}
+              {leads.length === 0 ? (
+                <div style={{ textAlign:"center", padding:"60px 20px", color:"#333", fontSize:14 }}>
+                  <div style={{ fontSize:40, marginBottom:12 }}>📋</div>
+                  Koi lead nahi abhi<br /><span style={{ color:"#555" }}>Upload tab se PDF daalo</span>
+                </div>
+              ) : (
+                leads.map(lead => (
+                  <LeadCard
+                    key={lead.id}
+                    lead={lead}
+                    onSend={() => openWhatsApp(lead.phone, lead.pitch)}
+                    onDelete={() => setLeads(prev => prev.filter(l => l.id!==lead.id))}
+                    onRegenerate={() => regeneratePitch(lead)}
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
